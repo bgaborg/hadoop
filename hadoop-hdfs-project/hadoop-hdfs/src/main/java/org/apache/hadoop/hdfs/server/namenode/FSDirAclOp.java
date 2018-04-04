@@ -40,7 +40,7 @@ class FSDirAclOp {
       List<AclEntry> aclSpec) throws IOException {
     String src = srcArg;
     checkAclsConfigFlag(fsd);
-    INodesInPath iip;
+    INodesInPath iip = null;
     fsd.writeLock();
     try {
       iip = fsd.resolvePath(pc, src, DirOp.WRITE);
@@ -53,6 +53,9 @@ class FSDirAclOp {
           existingAcl, aclSpec);
       AclStorage.updateINodeAcl(inode, newAcl, snapshotId);
       fsd.getEditLog().logSetAcl(src, newAcl);
+    } catch (AclException e){
+      String path = FSDirectory.resolveLastINode(iip).getFullPathName();
+      throw new AclException(e.getMessage() + " Path: " + path, e);
     } finally {
       fsd.writeUnlock();
     }
@@ -64,7 +67,7 @@ class FSDirAclOp {
       List<AclEntry> aclSpec) throws IOException {
     String src = srcArg;
     checkAclsConfigFlag(fsd);
-    INodesInPath iip;
+    INodesInPath iip = null;
     fsd.writeLock();
     try {
       iip = fsd.resolvePath(pc, src, DirOp.WRITE);
@@ -77,6 +80,9 @@ class FSDirAclOp {
         existingAcl, aclSpec);
       AclStorage.updateINodeAcl(inode, newAcl, snapshotId);
       fsd.getEditLog().logSetAcl(src, newAcl);
+    } catch (AclException e){
+      String path = FSDirectory.resolveLastINode(iip).getFullPathName();
+      throw new AclException(e.getMessage() + " Path: " + path, e);
     } finally {
       fsd.writeUnlock();
     }
@@ -87,7 +93,7 @@ class FSDirAclOp {
       final String srcArg) throws IOException {
     String src = srcArg;
     checkAclsConfigFlag(fsd);
-    INodesInPath iip;
+    INodesInPath iip = null;
     fsd.writeLock();
     try {
       iip = fsd.resolvePath(pc, src, DirOp.WRITE);
@@ -100,6 +106,9 @@ class FSDirAclOp {
         existingAcl);
       AclStorage.updateINodeAcl(inode, newAcl, snapshotId);
       fsd.getEditLog().logSetAcl(src, newAcl);
+    } catch (AclException e){
+      String path = FSDirectory.resolveLastINode(iip).getFullPathName();
+      throw new AclException(e.getMessage() + " Path: " + path, e);
     } finally {
       fsd.writeUnlock();
     }
@@ -110,13 +119,16 @@ class FSDirAclOp {
       final String srcArg) throws IOException {
     String src = srcArg;
     checkAclsConfigFlag(fsd);
-    INodesInPath iip;
+    INodesInPath iip = null;
     fsd.writeLock();
     try {
       iip = fsd.resolvePath(pc, src, DirOp.WRITE);
       src = iip.getPath();
       fsd.checkOwner(pc, iip);
       unprotectedRemoveAcl(fsd, iip);
+    } catch (AclException e){
+      String path = FSDirectory.resolveLastINode(iip).getFullPathName();
+      throw new AclException(e.getMessage() + " Path: " + path, e);
     } finally {
       fsd.writeUnlock();
     }
@@ -129,13 +141,16 @@ class FSDirAclOp {
       List<AclEntry> aclSpec) throws IOException {
     String src = srcArg;
     checkAclsConfigFlag(fsd);
-    INodesInPath iip;
+    INodesInPath iip = null;
     fsd.writeLock();
     try {
       iip = fsd.resolvePath(pc, src, DirOp.WRITE);
       fsd.checkOwner(pc, iip);
       List<AclEntry> newAcl = unprotectedSetAcl(fsd, iip, aclSpec, false);
       fsd.getEditLog().logSetAcl(iip.getPath(), newAcl);
+    } catch (AclException e){
+      String path = FSDirectory.resolveLastINode(iip).getFullPathName();
+      throw new AclException(e.getMessage() + " Path: " + path, e);
     } finally {
       fsd.writeUnlock();
     }
@@ -146,8 +161,9 @@ class FSDirAclOp {
       FSDirectory fsd, FSPermissionChecker pc, String src) throws IOException {
     checkAclsConfigFlag(fsd);
     fsd.readLock();
+    INodesInPath iip = null;
     try {
-      INodesInPath iip = fsd.resolvePath(pc, src, DirOp.READ);
+      iip = fsd.resolvePath(pc, src, DirOp.READ);
       // There is no real inode for the path ending in ".snapshot", so return a
       // non-null, unpopulated AclStatus.  This is similar to getFileInfo.
       if (iip.isDotSnapshotDir() && fsd.getINode4DotSnapshot(iip) != null) {
@@ -162,6 +178,9 @@ class FSDirAclOp {
           .stickyBit(fsPermission.getStickyBit())
           .setPermission(fsPermission)
           .addEntries(acl).build();
+    } catch (AclException e){
+      String path = FSDirectory.resolveLastINode(iip).getFullPathName();
+      throw new AclException(e.getMessage() + " Path: " + path, e);
     } finally {
       fsd.readUnlock();
     }

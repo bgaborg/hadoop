@@ -42,6 +42,8 @@ import org.apache.hadoop.fs.CommonConfigurationKeysPublic;
 
 import javax.crypto.KeyGenerator;
 
+import static org.apache.hadoop.fs.CommonConfigurationKeysPublic.HADOOP_SECURITY_CRYPTO_JCEKS_KEY_SERIALFILTER;
+
 /**
  * A provider of secret key material for Hadoop applications. Provides an
  * abstraction to separate key storage from users of encryption. It
@@ -394,6 +396,12 @@ public abstract class KeyProvider {
    */
   public KeyProvider(Configuration conf) {
     this.conf = new Configuration(conf);
+    // Added for HDFS-13494. Configured serialFilter property fixes
+    // java.security.UnrecoverableKeyException in JDK 8u171. Default value 
+    // added to core-default.xml
+    String serialfilter = conf.get(
+          HADOOP_SECURITY_CRYPTO_JCEKS_KEY_SERIALFILTER, "");
+    System.setProperty("jceks.key.serialFilter", serialfilter);
   }
 
   /**

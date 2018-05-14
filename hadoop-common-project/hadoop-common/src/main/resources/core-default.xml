@@ -2487,6 +2487,23 @@
 </property>
 
 <property>
+  <name>hadoop.security.crypto.jceks.key.serialfilter</name>
+  <description>
+    Enhanced KeyStore Mechanisms in JDK 8u171 introduced jceks.key.serialFilter.
+    If this filter is configured, the JCEKS KeyStore uses it during the
+    deserialization of the encrypted Key object stored inside a SecretKeyEntry.
+    If it is not configured it will cause error when recovering keystore file
+    in KeyProviderFactory when recovering key from keystore file if JDK
+    8u171 is used. The filter pattern uses the same format as jdk.serialFilter. 
+    The default pattern allows java.lang.Enum, java.security.KeyRep,
+    java.security.KeyRep$Type, and javax.crypto.spec.SecretKeySpec but rejects
+    all the others.
+  </description>
+  <value>java.lang.Enum;java.security.KeyRep;java.security.KeyRep$Type;javax.crypto.spec.SecretKeySpec;org.apache.hadoop.crypto.key.JavaKeyStoreProvider$KeyMetadata;!*
+  </value>
+</property>
+
+<property>
   <name>hadoop.security.crypto.buffer.size</name>
   <value>8192</value>
   <description>

@@ -25,12 +25,14 @@ import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.PrintStream;
+import java.net.URI;
 import java.util.Collection;
 import java.util.HashSet;
 import java.util.Set;
 import java.util.concurrent.Callable;
 import java.util.concurrent.TimeUnit;
 
+import org.apache.hadoop.fs.FileSystem;
 import org.junit.Assume;
 import org.junit.Test;
 
@@ -47,6 +49,8 @@ import org.apache.hadoop.io.IOUtils;
 import org.apache.hadoop.util.ExitUtil;
 import org.apache.hadoop.util.StringUtils;
 
+import static org.apache.hadoop.fs.s3a.Constants.S3GUARD_METASTORE_NULL;
+import static org.apache.hadoop.fs.s3a.Constants.S3_METADATA_STORE_IMPL;
 import static org.apache.hadoop.fs.s3a.s3guard.S3GuardTool.E_BAD_STATE;
 import static org.apache.hadoop.fs.s3a.s3guard.S3GuardTool.SUCCESS;
 import static org.apache.hadoop.test.LambdaTestUtils.intercept;
@@ -142,15 +146,20 @@ public abstract class AbstractS3GuardToolTestBase extends AbstractS3ATestBase {
     IOUtils.cleanupWithLogger(LOG, ms);
   }
 
-  protected void mkdirs(Path path, boolean onS3, boolean onMetadataStore)
-      throws IOException {
+  protected void mkdirs(FileSystem fs, Path path, boolean onS3,
+      boolean onMetadataStore) throws IOException {
     if (onS3) {
-      getFileSystem().mkdirs(path);
+      fs.mkdirs(path);
     }
     if (onMetadataStore) {
       S3AFileStatus status = new S3AFileStatus(true, path, OWNER);
       ms.put(new PathMetadata(status));
     }
+  }
+
+  protected void mkdirs(Path path, boolean onS3, boolean onMetadataStore)
+      throws IOException {
+    mkdirs(getFileSystem(), path, onS3, onMetadataStore);
   }
 
   protected static void putFile(MetadataStore ms, S3AFileStatus f)
@@ -167,23 +176,29 @@ public abstract class AbstractS3GuardToolTestBase extends AbstractS3ATestBase {
 
   /**
    * Create file either on S3 or in metadata store.
+   * @param fs FileSystem to use
    * @param path the file path.
    * @param onS3 set to true to create the file on S3.
    * @param onMetadataStore set to true to create the file on the
    *                        metadata store.
    * @throws IOException IO problem
    */
-  protected void createFile(Path path, boolean onS3, boolean onMetadataStore)
-      throws IOException {
+  protected void createFile(S3AFileSystem fs, Path path, boolean onS3,
+      boolean onMetadataStore) throws IOException {
     if (onS3) {
-      ContractTestUtils.touch(getFileSystem(), path);
+      ContractTestUtils.touch(fs, path);
     }
 
     if (onMetadataStore) {
       S3AFileStatus status = new S3AFileStatus(100L, System.currentTimeMillis(),
-          getFileSystem().qualify(path), 512L, "hdfs");
+          fs.qualify(path), 512L, "hdfs");
       putFile(ms, status);
     }
+  }
+
+  protected void createFile(Path path, boolean onS3, boolean onMetadataStore)
+      throws IOException {
+    createFile(getFileSystem(), path, onS3, onMetadataStore);
   }
 
   private void testPruneCommand(Configuration cmdConf, Path parent,
@@ -323,29 +338,33 @@ public abstract class AbstractS3GuardToolTestBase extends AbstractS3ATestBase {
 
   @Test
   public void testDiffCommand() throws Exception {
-    S3AFileSystem fs = getFileSystem();
+    Configuration conf = new Configuration();
+    conf.set(S3_METADATA_STORE_IMPL, S3GUARD_METASTORE_NULL);
+    URI fsUri = getFileSystem().getUri();
+    S3AFileSystem fs = (S3AFileSystem) FileSystem.newInstance(fsUri, conf);
+
     ms = getMetadataStore();
     Set<Path> filesOnS3 = new HashSet<>(); // files on S3.
     Set<Path> filesOnMS = new HashSet<>(); // files on metadata store.
 
     Path testPath = path("test-diff");
-    mkdirs(testPath, true, true);
+    mkdirs(fs, testPath, true, true);
 
     Path msOnlyPath = new Path(testPath, "ms_only");
-    mkdirs(msOnlyPath, false, true);
+    mkdirs(fs, msOnlyPath, false, true);
     filesOnMS.add(msOnlyPath);
     for (int i = 0; i < 5; i++) {
       Path file = new Path(msOnlyPath, String.format("file-%d", i));
-      createFile(file, false, true);
+      createFile(fs, file, false, true);
       filesOnMS.add(file);
     }
 
     Path s3OnlyPath = new Path(testPath, "s3_only");
-    mkdirs(s3OnlyPath, true, false);
+    mkdirs(fs, s3OnlyPath, true, false);
     filesOnS3.add(s3OnlyPath);
     for (int i = 0; i < 5; i++) {
       Path file = new Path(s3OnlyPath, String.format("file-%d", i));
-      createFile(file, true, false);
+      createFile(fs, file, true, false);
       filesOnS3.add(file);
     }
 

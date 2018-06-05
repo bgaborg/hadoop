@@ -36,8 +36,10 @@ public class ReplicaNotFoundException extends IOException {
   public final static String UNFINALIZED_AND_NONRBW_REPLICA =
       "Cannot recover append/close to a replica that's not FINALIZED and not RBW"
           + " ";
-  public final static String NON_EXISTENT_REPLICA =
+  public final static String NON_EXISTENT_REPLICA_APPEND =
       "Cannot append to a non-existent replica ";
+  public final static String NON_EXISTENT_REPLICA =
+      "Replica does not exist ";
   public final static String UNEXPECTED_GS_REPLICA =
       "Cannot append to a replica with unexpected generation stamp ";
 

@@ -1516,7 +1516,7 @@ class FsDatasetImpl implements FsDatasetSpi<FsVolumeImpl> {
         final ReplicaInfo r = volumeMap.get(b.getBlockPoolId(), blockId);
         if (r == null) {
           throw new ReplicaNotFoundException(
-              ReplicaNotFoundException.NON_EXISTENT_REPLICA + b);
+              ReplicaNotFoundException.NON_EXISTENT_REPLICA_APPEND + b);
         }
         // check the replica's state
         if (r.getState() != ReplicaState.TEMPORARY) {

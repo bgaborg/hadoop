@@ -18,13 +18,13 @@
 
 package org.apache.hadoop.fs.s3a.s3guard;
 
+import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.net.URI;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
 
-import com.amazonaws.AmazonServiceException;
 import com.amazonaws.services.dynamodbv2.document.DynamoDB;
 import com.amazonaws.services.dynamodbv2.document.Item;
 import com.amazonaws.services.dynamodbv2.document.PrimaryKey;
@@ -35,29 +35,28 @@ import com.amazonaws.services.dynamodbv2.model.TableDescription;
 
 import com.google.common.collect.Lists;
 import org.apache.commons.collections.CollectionUtils;
+import org.apache.hadoop.fs.contract.s3a.S3AContract;
+import org.apache.hadoop.fs.s3a.Constants;
 import org.apache.hadoop.fs.s3a.Tristate;
 
+import org.apache.hadoop.io.IOUtils;
 import org.junit.AfterClass;
+import org.junit.Assume;
 import org.junit.BeforeClass;
-import org.junit.Rule;
 import org.junit.Test;
-import org.junit.rules.Timeout;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.fs.CommonConfigurationKeysPublic;
 import org.apache.hadoop.fs.FileStatus;
-import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
-import org.apache.hadoop.fs.s3a.MockS3ClientFactory;
 import org.apache.hadoop.fs.s3a.S3AFileStatus;
 import org.apache.hadoop.fs.s3a.S3AFileSystem;
-import org.apache.hadoop.fs.s3a.S3ClientFactory;
 import org.apache.hadoop.security.UserGroupInformation;
 
 import static org.apache.hadoop.fs.s3a.Constants.*;
+import static org.apache.hadoop.fs.s3a.S3ATestUtils.*;
 import static org.apache.hadoop.fs.s3a.s3guard.PathMetadataDynamoDBTranslation.*;
 import static org.apache.hadoop.fs.s3a.s3guard.DynamoDBMetadataStore.*;
 import static org.apache.hadoop.test.LambdaTestUtils.*;
@@ -65,106 +64,153 @@ import static org.apache.hadoop.test.LambdaTestUtils.*;
 /**
  * Test that {@link DynamoDBMetadataStore} implements {@link MetadataStore}.
  *
- * In this unit test, we use an in-memory DynamoDBLocal server instead of real
- * AWS DynamoDB. An {@link S3AFileSystem} object is created and shared for
- * initializing {@link DynamoDBMetadataStore} objects.  There are no real S3
- * request issued as the underlying AWS S3Client is mocked.  You won't be
- * charged bills for AWS S3 or DynamoDB when you run this test.
+ * In this integration test, we use a real AWS DynamoDB. A
+ * {@link DynamoDBMetadataStore} object is created in the @BeforeClass method,
+ * and shared for all test in the @BeforeClass method. You will be charged
+ * bills for AWS S3 or DynamoDB when you run these tests.
  *
  * According to the base class, every test case will have independent contract
- * to create a new {@link DynamoDBMetadataStore} instance and initializes it.
- * A table will be created for each test by the test contract, and will be
- * destroyed after the test case finishes.
+ * to create a new {@link S3AFileSystem} instance and initializes it.
+ * A table will be created and shared between the tests,
  */
-public class TestDynamoDBMetadataStore extends MetadataStoreTestBase {
+public class ITestDynamoDBMetadataStore extends MetadataStoreTestBase {
   private static final Logger LOG =
-      LoggerFactory.getLogger(TestDynamoDBMetadataStore.class);
-  private static final String BUCKET = "TestDynamoDBMetadataStore";
-  private static final String S3URI =
-      URI.create(FS_S3A + "://" + BUCKET + "/").toString();
+      LoggerFactory.getLogger(ITestDynamoDBMetadataStore.class);
   public static final PrimaryKey
       VERSION_MARKER_PRIMARY_KEY = createVersionMarkerPrimaryKey(
       DynamoDBMetadataStore.VERSION_MARKER);
 
-  /** The DynamoDB instance that can issue requests directly to server. */
-  private static DynamoDB dynamoDB;
+  private S3AFileSystem fileSystem;
+  private S3AContract s3AContract;
 
-  @Rule
-  public final Timeout timeout = new Timeout(60 * 1000);
+  private URI fsUri;
+
+  private String bucket;
+
+  private static DynamoDBMetadataStore ddbmsStatic;
+
+  private static String TEST_DYNAMODB_TABLE_NAME;
 
   /**
-   * Start the in-memory DynamoDBLocal server and initializes s3 file system.
+   * Create a path under the test path provided by
+   * the FS contract.
+   * @param filepath path string in
+   * @return a path qualified by the test filesystem
    */
-  @BeforeClass
-  public static void setUpBeforeClass() throws Exception {
-    DynamoDBLocalClientFactory.startSingletonServer();
-    try {
-      dynamoDB = new DynamoDBMSContract().getMetadataStore().getDynamoDB();
-    } catch (AmazonServiceException e) {
-      final String msg = "Cannot initialize a DynamoDBMetadataStore instance "
-          + "against the local DynamoDB server. Perhaps the DynamoDBLocal "
-          + "server is not configured correctly. ";
-      LOG.error(msg, e);
-      // fail fast if the DynamoDBLocal server can not work
-      throw e;
+  protected Path path(String filepath) {
+    return getFileSystem().makeQualified(
+        new Path(s3AContract.getTestPath(), filepath));
+  }
+
+  @Override
+  public void setUp() throws Exception {
+    Configuration conf = prepareTestConfiguration(new Configuration());
+    assertThatDynamoMetadataStoreImpl(conf);
+    Assume.assumeTrue("Test DynamoDB table name should be set to run "
+            + "integration tests.", TEST_DYNAMODB_TABLE_NAME != null);
+    conf.set(S3GUARD_DDB_TABLE_NAME_KEY, TEST_DYNAMODB_TABLE_NAME);
+
+    s3AContract = new S3AContract(conf);
+    s3AContract.init();
+
+    fileSystem = (S3AFileSystem) s3AContract.getTestFileSystem();
+    assume("No test filesystem", s3AContract.isEnabled());
+    assertNotNull("No test filesystem", fileSystem);
+    fsUri = fileSystem.getUri();
+    bucket = fileSystem.getBucket();
+
+    try{
+      super.setUp();
+    } catch (FileNotFoundException e){
+      LOG.warn("MetadataStoreTestBase setup failed. Waiting for table to be "
+          + "deleted before trying again.");
+      ddbmsStatic.getTable().waitForDelete();
+      super.setUp();
     }
   }
 
+
+  @BeforeClass
+  public static void beforeClassSetup() throws IOException {
+    Configuration conf = prepareTestConfiguration(new Configuration());
+    assertThatDynamoMetadataStoreImpl(conf);
+    TEST_DYNAMODB_TABLE_NAME = conf.get(S3GUARD_DDB_TEST_TABLE_NAME_KEY);
+    Assume.assumeTrue("Test DynamoDB table name should be set to run "
+        + "integration tests.", TEST_DYNAMODB_TABLE_NAME != null);
+    conf.set(S3GUARD_DDB_TABLE_NAME_KEY, TEST_DYNAMODB_TABLE_NAME);
+
+    LOG.debug("Creating static ddbms which will be shared between tests.");
+    ddbmsStatic = new DynamoDBMetadataStore();
+    ddbmsStatic.initialize(conf);
+  }
+
   @AfterClass
-  public static void tearDownAfterClass() throws Exception {
-    if (dynamoDB != null) {
-      dynamoDB.shutdown();
+  public static void afterClassTeardown() {
+    LOG.debug("Destroying static DynamoDBMetadataStore.");
+    if (ddbmsStatic != null) {
+      try {
+        ddbmsStatic.destroy();
+      } catch (Exception e) {
+        LOG.warn("Failed to destroy tables in teardown", e);
+      }
+      IOUtils.closeStream(ddbmsStatic);
+      ddbmsStatic = null;
     }
-    DynamoDBLocalClientFactory.stopSingletonServer();
+  }
+
+  private static void assertThatDynamoMetadataStoreImpl(Configuration conf){
+    Assume.assumeTrue("Test only applies when DynamoDB is used for S3Guard",
+        conf.get(Constants.S3_METADATA_STORE_IMPL).equals(
+            Constants.S3GUARD_METASTORE_DYNAMO));
+  }
+
+
+  @Override
+  public void tearDown() throws Exception {
+    LOG.info("Removing data from ddbms table in teardown.");
+    // The following is a way to be sure the table will be cleared and there
+    // will be no leftovers after the test.
+    PathMetadata meta = ddbmsStatic.get(strToPath("/"));
+    if (meta != null){
+      for (DescendantsIterator desc = new DescendantsIterator(ddbmsStatic, meta);
+           desc.hasNext();) {
+        ddbmsStatic.forgetMetadata(desc.next().getPath());
+      }
+    }
+
+    fileSystem.close();
   }
 
   /**
    * Each contract has its own S3AFileSystem and DynamoDBMetadataStore objects.
    */
-  private static class DynamoDBMSContract extends AbstractMSContract {
-    private final S3AFileSystem s3afs;
-    private final DynamoDBMetadataStore ms = new DynamoDBMetadataStore();
+  private class DynamoDBMSContract extends AbstractMSContract {
 
-    DynamoDBMSContract() throws IOException {
-        this(new Configuration());
+    DynamoDBMSContract(Configuration conf) {
     }
 
-    DynamoDBMSContract(Configuration conf) throws IOException {
-      // using mocked S3 clients
-      conf.setClass(S3_CLIENT_FACTORY_IMPL, MockS3ClientFactory.class,
-          S3ClientFactory.class);
-      conf.set(CommonConfigurationKeysPublic.FS_DEFAULT_NAME_KEY, S3URI);
-      // setting config for creating a DynamoDBClient against local server
-      conf.set(ACCESS_KEY, "dummy-access-key");
-      conf.set(SECRET_KEY, "dummy-secret-key");
-      conf.setBoolean(S3GUARD_DDB_TABLE_CREATE_KEY, true);
-      conf.setClass(S3Guard.S3GUARD_DDB_CLIENT_FACTORY_IMPL,
-          DynamoDBLocalClientFactory.class, DynamoDBClientFactory.class);
-
-      // always create new file system object for a test contract
-      s3afs = (S3AFileSystem) FileSystem.newInstance(conf);
-      ms.initialize(s3afs);
+    DynamoDBMSContract() {
+      this(new Configuration());
     }
 
     @Override
     public S3AFileSystem getFileSystem() {
-      return s3afs;
+      return ITestDynamoDBMetadataStore.this.fileSystem;
     }
 
     @Override
     public DynamoDBMetadataStore getMetadataStore() {
-      return ms;
+      return ITestDynamoDBMetadataStore.ddbmsStatic;
     }
   }
 
   @Override
-  public DynamoDBMSContract createContract() throws IOException {
+  public DynamoDBMSContract createContract() {
     return new DynamoDBMSContract();
   }
 
   @Override
-  public DynamoDBMSContract createContract(Configuration conf) throws
-      IOException {
+  public DynamoDBMSContract createContract(Configuration conf) {
     return new DynamoDBMSContract(conf);
   }
 
@@ -181,8 +227,8 @@ public class TestDynamoDBMetadataStore extends MetadataStoreTestBase {
     return (DynamoDBMetadataStore) getContract().getMetadataStore();
   }
 
-  private S3AFileSystem getFileSystem() throws IOException {
-    return (S3AFileSystem) getContract().getFileSystem();
+  private S3AFileSystem getFileSystem() {
+    return this.fileSystem;
   }
 
   /**
@@ -191,21 +237,22 @@ public class TestDynamoDBMetadataStore extends MetadataStoreTestBase {
    */
   @Test
   public void testInitialize() throws IOException {
-    final String tableName = "testInitializeWithFileSystem";
-    final S3AFileSystem s3afs = getFileSystem();
+    final S3AFileSystem s3afs = this.fileSystem;
+    final String tableName = "testInitialize";
     final Configuration conf = s3afs.getConf();
     conf.set(S3GUARD_DDB_TABLE_NAME_KEY, tableName);
     try (DynamoDBMetadataStore ddbms = new DynamoDBMetadataStore()) {
       ddbms.initialize(s3afs);
-      verifyTableInitialized(tableName);
+      verifyTableInitialized(tableName, ddbms.getDynamoDB());
       assertNotNull(ddbms.getTable());
       assertEquals(tableName, ddbms.getTable().getTableName());
       String expectedRegion = conf.get(S3GUARD_DDB_REGION_KEY,
-          s3afs.getBucketLocation(tableName));
+          s3afs.getBucketLocation(bucket));
       assertEquals("DynamoDB table should be in configured region or the same" +
               " region as S3 bucket",
           expectedRegion,
           ddbms.getRegion());
+      ddbms.destroy();
     }
   }
 
@@ -237,12 +284,13 @@ public class TestDynamoDBMetadataStore extends MetadataStoreTestBase {
     conf.set(S3GUARD_DDB_REGION_KEY, savedRegion);
     try (DynamoDBMetadataStore ddbms = new DynamoDBMetadataStore()) {
       ddbms.initialize(conf);
-      verifyTableInitialized(tableName);
+      verifyTableInitialized(tableName, ddbms.getDynamoDB());
       assertNotNull(ddbms.getTable());
       assertEquals(tableName, ddbms.getTable().getTableName());
       assertEquals("Unexpected key schema found!",
           keySchema(),
           ddbms.getTable().describe().getKeySchema());
+      ddbms.destroy();
     }
   }
 
@@ -258,31 +306,35 @@ public class TestDynamoDBMetadataStore extends MetadataStoreTestBase {
         S3GUARD_DDB_BATCH_WRITE_REQUEST_LIMIT, // exact limit of a batch request
         S3GUARD_DDB_BATCH_WRITE_REQUEST_LIMIT + 1 // limit + 1
     };
+    DynamoDBMetadataStore ms = getDynamoMetadataStore();
     for (int numOldMetas : numMetasToDeleteOrPut) {
       for (int numNewMetas : numMetasToDeleteOrPut) {
-        doTestBatchWrite(numOldMetas, numNewMetas);
+        doTestBatchWrite(numOldMetas, numNewMetas, ms);
       }
     }
   }
 
-  private void doTestBatchWrite(int numDelete, int numPut) throws IOException {
-    final String root = S3URI + "/testBatchWrite_" + numDelete + '_' + numPut;
+  private void doTestBatchWrite(int numDelete, int numPut,
+      DynamoDBMetadataStore ms) throws IOException {
+    Path path = new Path(
+        "/ITestDynamoDBMetadataStore_testBatchWrite_" + numDelete + '_'
+            + numPut);
+    final Path root = fileSystem.makeQualified(path);
     final Path oldDir = new Path(root, "oldDir");
     final Path newDir = new Path(root, "newDir");
     LOG.info("doTestBatchWrite: oldDir={}, newDir={}", oldDir, newDir);
 
-    DynamoDBMetadataStore ms = getDynamoMetadataStore();
     ms.put(new PathMetadata(basicFileStatus(oldDir, 0, true)));
     ms.put(new PathMetadata(basicFileStatus(newDir, 0, true)));
 
-    final List<PathMetadata> oldMetas =
-        numDelete < 0 ? null : new ArrayList<PathMetadata>(numDelete);
+    final List<PathMetadata> oldMetas = numDelete < 0 ? null :
+        new ArrayList<>(numDelete);
     for (int i = 0; i < numDelete; i++) {
       oldMetas.add(new PathMetadata(
           basicFileStatus(new Path(oldDir, "child" + i), i, true)));
     }
-    final List<PathMetadata> newMetas =
-        numPut < 0 ? null : new ArrayList<PathMetadata>(numPut);
+    final List<PathMetadata> newMetas = numPut < 0 ? null :
+        new ArrayList<>(numPut);
     for (int i = 0; i < numPut; i++) {
       newMetas.add(new PathMetadata(
           basicFileStatus(new Path(newDir, "child" + i), i, false)));
@@ -293,8 +345,8 @@ public class TestDynamoDBMetadataStore extends MetadataStoreTestBase {
       // put all metadata of old paths and verify
       ms.put(new DirListingMetadata(oldDir, oldMetas, false));
       assertEquals(0, ms.listChildren(newDir).withoutTombstones().numEntries());
-      assertTrue(CollectionUtils.isEqualCollection(oldMetas,
-          ms.listChildren(oldDir).getListing()));
+      assertTrue(CollectionUtils
+          .isEqualCollection(oldMetas, ms.listChildren(oldDir).getListing()));
 
       pathsToDelete = new ArrayList<>(oldMetas.size());
       for (PathMetadata meta : oldMetas) {
@@ -306,8 +358,8 @@ public class TestDynamoDBMetadataStore extends MetadataStoreTestBase {
     ms.move(pathsToDelete, newMetas);
     assertEquals(0, ms.listChildren(oldDir).withoutTombstones().numEntries());
     if (newMetas != null) {
-      assertTrue(CollectionUtils.isEqualCollection(newMetas,
-          ms.listChildren(newDir).getListing()));
+      assertTrue(CollectionUtils
+          .isEqualCollection(newMetas, ms.listChildren(newDir).getListing()));
     }
   }
 
@@ -315,10 +367,10 @@ public class TestDynamoDBMetadataStore extends MetadataStoreTestBase {
   public void testInitExistingTable() throws IOException {
     final DynamoDBMetadataStore ddbms = getDynamoMetadataStore();
     final String tableName = ddbms.getTable().getTableName();
-    verifyTableInitialized(tableName);
+    verifyTableInitialized(tableName, ddbms.getDynamoDB());
     // create existing table
     ddbms.initTable();
-    verifyTableInitialized(tableName);
+    verifyTableInitialized(tableName, ddbms.getDynamoDB());
   }
 
   /**
@@ -337,14 +389,9 @@ public class TestDynamoDBMetadataStore extends MetadataStoreTestBase {
   @Test
   public void testItemLacksVersion() throws Throwable {
     intercept(IOException.class, E_NOT_VERSION_MARKER,
-        new VoidCallable() {
-          @Override
-          public void call() throws Exception {
-            verifyVersionCompatibility("table",
-                new Item().withPrimaryKey(
-                    createVersionMarkerPrimaryKey(VERSION_MARKER)));
-          }
-        });
+        () -> verifyVersionCompatibility("table",
+            new Item().withPrimaryKey(
+                createVersionMarkerPrimaryKey(VERSION_MARKER))));
   }
 
   /**
@@ -352,26 +399,25 @@ public class TestDynamoDBMetadataStore extends MetadataStoreTestBase {
    */
   @Test
   public void testTableVersionRequired() throws Exception {
+    String tableName = "testTableVersionRequired";
     Configuration conf = getFileSystem().getConf();
     int maxRetries = conf.getInt(S3GUARD_DDB_MAX_RETRIES,
         S3GUARD_DDB_MAX_RETRIES_DEFAULT);
     conf.setInt(S3GUARD_DDB_MAX_RETRIES, 3);
+    conf.set(S3GUARD_DDB_TABLE_NAME_KEY, tableName);
 
-    final DynamoDBMetadataStore ddbms = createContract(conf).getMetadataStore();
-    String tableName = conf.get(S3GUARD_DDB_TABLE_NAME_KEY, BUCKET);
-    Table table = verifyTableInitialized(tableName);
-    table.deleteItem(VERSION_MARKER_PRIMARY_KEY);
+    try(DynamoDBMetadataStore ddbms = new DynamoDBMetadataStore()) {
+      ddbms.initialize(conf);
+      Table table = verifyTableInitialized(tableName, ddbms.getDynamoDB());
+      table.deleteItem(VERSION_MARKER_PRIMARY_KEY);
 
-    // create existing table
-    intercept(IOException.class, E_NO_VERSION_MARKER,
-        new VoidCallable() {
-          @Override
-          public void call() throws Exception {
-            ddbms.initTable();
-          }
-        });
+      // create existing table
+      intercept(IOException.class, E_NO_VERSION_MARKER,
+          () -> ddbms.initTable());
 
-    conf.setInt(S3GUARD_DDB_MAX_RETRIES, maxRetries);
+      conf.setInt(S3GUARD_DDB_MAX_RETRIES, maxRetries);
+      ddbms.destroy();
+    }
   }
 
   /**
@@ -380,23 +426,26 @@ public class TestDynamoDBMetadataStore extends MetadataStoreTestBase {
    */
   @Test
   public void testTableVersionMismatch() throws Exception {
-    final DynamoDBMetadataStore ddbms = createContract().getMetadataStore();
-    String tableName = getFileSystem().getConf()
-        .get(S3GUARD_DDB_TABLE_NAME_KEY, BUCKET);
-    Table table = verifyTableInitialized(tableName);
-    table.deleteItem(VERSION_MARKER_PRIMARY_KEY);
-    Item v200 = createVersionMarker(VERSION_MARKER, 200, 0);
-    table.putItem(v200);
+    String tableName = "testTableVersionMismatch";
+    Configuration conf = getFileSystem().getConf();
+    conf.set(S3GUARD_DDB_TABLE_NAME_KEY, tableName);
 
-    // create existing table
-    intercept(IOException.class, E_INCOMPATIBLE_VERSION,
-        new VoidCallable() {
-          @Override
-          public void call() throws Exception {
-            ddbms.initTable();
-          }
-        });
+    try(DynamoDBMetadataStore ddbms = new DynamoDBMetadataStore()) {
+      ddbms.initialize(conf);
+      Table table = verifyTableInitialized(tableName, ddbms.getDynamoDB());
+      table.deleteItem(VERSION_MARKER_PRIMARY_KEY);
+      Item v200 = createVersionMarker(VERSION_MARKER, 200, 0);
+      table.putItem(v200);
+
+      // create existing table
+      intercept(IOException.class, E_INCOMPATIBLE_VERSION,
+          () -> ddbms.initTable());
+      ddbms.destroy();
+    }
   }
+
+
+
 
   /**
    * Test that initTable fails with IOException when table does not exist and
@@ -423,13 +472,13 @@ public class TestDynamoDBMetadataStore extends MetadataStoreTestBase {
   @Test
   public void testRootDirectory() throws IOException {
     final DynamoDBMetadataStore ddbms = getDynamoMetadataStore();
-    Path rootPath = new Path(S3URI);
+    Path rootPath = new Path(new Path(fsUri), "/");
     verifyRootDirectory(ddbms.get(rootPath), true);
 
     ddbms.put(new PathMetadata(new S3AFileStatus(true,
         new Path(rootPath, "foo"),
         UserGroupInformation.getCurrentUser().getShortUserName())));
-    verifyRootDirectory(ddbms.get(new Path(S3URI)), false);
+    verifyRootDirectory(ddbms.get(rootPath), false);
   }
 
   private void verifyRootDirectory(PathMetadata rootMeta, boolean isEmpty) {
@@ -520,45 +569,55 @@ public class TestDynamoDBMetadataStore extends MetadataStoreTestBase {
 
   @Test
   public void testProvisionTable() throws IOException {
-    final DynamoDBMetadataStore ddbms = getDynamoMetadataStore();
-    final String tableName = ddbms.getTable().getTableName();
-    final ProvisionedThroughputDescription oldProvision =
-        dynamoDB.getTable(tableName).describe().getProvisionedThroughput();
-    ddbms.provisionTable(oldProvision.getReadCapacityUnits() * 2,
-        oldProvision.getWriteCapacityUnits() * 2);
-    final ProvisionedThroughputDescription newProvision =
-        dynamoDB.getTable(tableName).describe().getProvisionedThroughput();
-    LOG.info("Old provision = {}, new provision = {}",
-        oldProvision, newProvision);
-    assertEquals(oldProvision.getReadCapacityUnits() * 2,
-        newProvision.getReadCapacityUnits().longValue());
-    assertEquals(oldProvision.getWriteCapacityUnits() * 2,
-        newProvision.getWriteCapacityUnits().longValue());
+    final String tableName = "testProvisionTable";
+    Configuration conf = getFileSystem().getConf();
+    conf.set(S3GUARD_DDB_TABLE_NAME_KEY, tableName);
+
+    try(DynamoDBMetadataStore ddbms = new DynamoDBMetadataStore()) {
+      ddbms.initialize(conf);
+      DynamoDB dynamoDB = ddbms.getDynamoDB();
+      final ProvisionedThroughputDescription oldProvision =
+          dynamoDB.getTable(tableName).describe().getProvisionedThroughput();
+      ddbms.provisionTable(oldProvision.getReadCapacityUnits() * 2,
+          oldProvision.getWriteCapacityUnits() * 2);
+      ddbms.initTable();
+      final ProvisionedThroughputDescription newProvision =
+          dynamoDB.getTable(tableName).describe().getProvisionedThroughput();
+      LOG.info("Old provision = {}, new provision = {}", oldProvision,
+          newProvision);
+      assertEquals(oldProvision.getReadCapacityUnits() * 2,
+          newProvision.getReadCapacityUnits().longValue());
+      assertEquals(oldProvision.getWriteCapacityUnits() * 2,
+          newProvision.getWriteCapacityUnits().longValue());
+      ddbms.destroy();
+    }
   }
 
   @Test
   public void testDeleteTable() throws Exception {
     final String tableName = "testDeleteTable";
+    Path testPath = new Path(new Path(fsUri), "/" + tableName);
     final S3AFileSystem s3afs = getFileSystem();
     final Configuration conf = s3afs.getConf();
     conf.set(S3GUARD_DDB_TABLE_NAME_KEY, tableName);
     try (DynamoDBMetadataStore ddbms = new DynamoDBMetadataStore()) {
       ddbms.initialize(s3afs);
       // we can list the empty table
-      ddbms.listChildren(new Path(S3URI));
-
+      ddbms.listChildren(testPath);
+      DynamoDB dynamoDB = ddbms.getDynamoDB();
       ddbms.destroy();
-      verifyTableNotExist(tableName);
+      verifyTableNotExist(tableName, dynamoDB);
 
       // delete table once more; be ResourceNotFoundException swallowed silently
       ddbms.destroy();
-      verifyTableNotExist(tableName);
+      verifyTableNotExist(tableName, dynamoDB);
       try {
         // we can no longer list the destroyed table
-        ddbms.listChildren(new Path(S3URI));
+        ddbms.listChildren(testPath);
         fail("Should have failed after the table is destroyed!");
       } catch (IOException ignored) {
       }
+      ddbms.destroy();
     }
   }
 
@@ -568,7 +627,7 @@ public class TestDynamoDBMetadataStore extends MetadataStoreTestBase {
    * This should not rely on the {@link DynamoDBMetadataStore} implementation.
    * Return the table
    */
-  private static Table verifyTableInitialized(String tableName) {
+  private Table verifyTableInitialized(String tableName, DynamoDB dynamoDB) {
     final Table table = dynamoDB.getTable(tableName);
     final TableDescription td = table.describe();
     assertEquals(tableName, td.getTableName());
@@ -581,7 +640,8 @@ public class TestDynamoDBMetadataStore extends MetadataStoreTestBase {
    *
    * This should not rely on the {@link DynamoDBMetadataStore} implementation.
    */
-  private static void verifyTableNotExist(String tableName) throws Exception{
+  private void verifyTableNotExist(String tableName, DynamoDB dynamoDB) throws
+      Exception{
     intercept(ResourceNotFoundException.class,
         () -> dynamoDB.getTable(tableName).describe());
   }

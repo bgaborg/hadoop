@@ -30,6 +30,8 @@ import static org.apache.hadoop.fs.CommonConfigurationKeysPublic.IO_FILE_BUFFER_
 import static org.apache.hadoop.fs.CommonConfigurationKeysPublic.IO_FILE_BUFFER_SIZE_KEY;
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_BLOCK_SIZE_DEFAULT;
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_BLOCK_SIZE_KEY;
+import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_LAZY_PERSIST_FILE_SCRUB_BREAKOUT_MS;
+import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_LAZY_PERSIST_FILE_SCRUB_BREAKOUT_MS_DEFAULT;
 import static org.apache.hadoop.hdfs.client.HdfsClientConfigKeys.DFS_BYTES_PER_CHECKSUM_DEFAULT;
 import static org.apache.hadoop.hdfs.client.HdfsClientConfigKeys.DFS_BYTES_PER_CHECKSUM_KEY;
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_CHECKSUM_TYPE_DEFAULT;
@@ -303,6 +305,7 @@ import org.apache.hadoop.security.token.delegation.DelegationKey;
 import org.apache.hadoop.util.Daemon;
 import org.apache.hadoop.util.DataChecksum;
 import org.apache.hadoop.util.ReflectionUtils;
+import org.apache.hadoop.util.StopWatch;
 import org.apache.hadoop.util.StringUtils;
 import org.apache.hadoop.util.VersionInfo;
 import org.apache.log4j.Appender;
@@ -502,6 +505,12 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
    * (In seconds)
    */
   private final int lazyPersistFileScrubIntervalSec;
+
+  /**
+   * How long should one iteration of scan and unlink corrupt lazyPersist
+   * files can take.
+   */
+  private final int lazyPersistFileScrubBreakoutMs;
 
   private volatile boolean hasResourcesAvailable = false;
   private volatile boolean fsRunning = true;
@@ -850,6 +859,11 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
       this.lazyPersistFileScrubIntervalSec = conf.getInt(
           DFS_NAMENODE_LAZY_PERSIST_FILE_SCRUB_INTERVAL_SEC,
           DFS_NAMENODE_LAZY_PERSIST_FILE_SCRUB_INTERVAL_SEC_DEFAULT);
+
+      this.lazyPersistFileScrubBreakoutMs = conf.getInt(
+          DFS_NAMENODE_LAZY_PERSIST_FILE_SCRUB_BREAKOUT_MS,
+          DFS_NAMENODE_LAZY_PERSIST_FILE_SCRUB_BREAKOUT_MS_DEFAULT
+      );
 
       if (this.lazyPersistFileScrubIntervalSec < 0) {
         throw new IllegalArgumentException(
@@ -1266,7 +1280,7 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
 
       if (lazyPersistFileScrubIntervalSec > 0) {
         lazyPersistFileScrubber = new Daemon(new LazyPersistFileScrubber(
-            lazyPersistFileScrubIntervalSec));
+            lazyPersistFileScrubIntervalSec, lazyPersistFileScrubBreakoutMs));
         lazyPersistFileScrubber.start();
       } else {
         LOG.warn("Lazy persist file scrubber is disabled,"
@@ -4034,8 +4048,11 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
   class LazyPersistFileScrubber implements Runnable {
     private volatile boolean shouldRun = true;
     final int scrubIntervalSec;
-    public LazyPersistFileScrubber(final int scrubIntervalSec) {
+    final int loopBreakoutMillis;
+    LazyPersistFileScrubber(final int scrubIntervalSec,
+        final int loopBreakoutMillis) {
       this.scrubIntervalSec = scrubIntervalSec;
+      this.loopBreakoutMillis = loopBreakoutMillis;
     }
 
     /**
@@ -4047,42 +4064,62 @@ public class FSNamesystem implements Namesystem, FSNamesystemMBean,
 
       BlockStoragePolicy lpPolicy = blockManager.getStoragePolicy("LAZY_PERSIST");
 
-      List<BlockCollection> filesToDelete = new ArrayList<>();
-      boolean changed = false;
-      writeLock();
-      try {
-        final Iterator<BlockInfo> it =
+      Iterator<BlockInfo> corruptReplicaBlockIterator =
+          blockManager.getCorruptReplicaBlockIterator();
+      boolean hasMoreCorruptBlocks = corruptReplicaBlockIterator.hasNext();
+
+      while(hasMoreCorruptBlocks){
+        writeLock();
+        // Get a new CorruptReplicaBlockIterator iterator after the writeLock
+        // to avoid keeping the same iterator between locks
+        corruptReplicaBlockIterator =
             blockManager.getCorruptReplicaBlockIterator();
 
-        while (it.hasNext()) {
-          Block b = it.next();
-          BlockInfo blockInfo = blockManager.getStoredBlock(b);
-          if (blockInfo == null) {
-            LOG.info("Cannot find block info for block " + b);
-          } else {
-            BlockCollection bc = getBlockCollection(blockInfo);
-            if (bc.getStoragePolicyID() == lpPolicy.getId()) {
-              filesToDelete.add(bc);
+        try {
+          StopWatch stopWatch = new StopWatch();
+          stopWatch.start();
+
+          boolean changed = false;
+
+          while (loopBreakoutMillis < stopWatch.now(TimeUnit.MILLISECONDS)
+              && corruptReplicaBlockIterator.hasNext()) {
+            Block b = corruptReplicaBlockIterator.next();
+            BlockInfo blockInfo = blockManager.getStoredBlock(b);
+            if (blockInfo == null) {
+              LOG.info("Cannot find block info for block " + b);
+            } else {
+              BlockCollection bc = getBlockCollection(blockInfo);
+              if (bc.getStoragePolicyID() == lpPolicy.getId()) {
+                deleteBlockCollection(bc);
+              }
+              changed = true;
             }
           }
-        }
 
-        for (BlockCollection bc : filesToDelete) {
-          LOG.warn("Removing lazyPersist file " + bc.getName() + " with no replicas.");
-          BlocksMapUpdateInfo toRemoveBlocks =
-              FSDirDeleteOp.deleteInternal(
-                  FSNamesystem.this,
-                  INodesInPath.fromINode((INodeFile) bc), false);
-          changed |= toRemoveBlocks != null;
-          if (toRemoveBlocks != null) {
-            removeBlocks(toRemoveBlocks); // Incremental deletion of blocks
+          if (changed) {
+            getEditLog().logSync();
           }
+
+          hasMoreCorruptBlocks = corruptReplicaBlockIterator.hasNext();
+        } finally {
+          writeUnlock("clearCorruptLazyPersistFiles");
         }
-      } finally {
-        writeUnlock("clearCorruptLazyPersistFiles");
+        Thread.yield();
       }
-      if (changed) {
-        getEditLog().logSync();
+    }
+
+    private void deleteBlockCollection(BlockCollection bc) throws
+        IOException {
+
+      LOG.warn("Removing lazyPersist file " + bc.getName() +
+          " with no replicas.");
+      BlocksMapUpdateInfo toRemoveBlocks = null;
+
+      toRemoveBlocks = FSDirDeleteOp.deleteInternal(
+            FSNamesystem.this,
+            INodesInPath.fromINode((INodeFile) bc), false);
+      if (toRemoveBlocks != null) {
+        removeBlocks(toRemoveBlocks); // Incremental deletion of blocks
       }
     }
 

@@ -322,7 +322,10 @@ public class DFSConfigKeys extends CommonConfigurationKeys {
 
   public static final String  DFS_NAMENODE_LAZY_PERSIST_FILE_SCRUB_INTERVAL_SEC = "dfs.namenode.lazypersist.file.scrub.interval.sec";
   public static final int     DFS_NAMENODE_LAZY_PERSIST_FILE_SCRUB_INTERVAL_SEC_DEFAULT = 5 * 60;
-  
+
+  public static final String DFS_NAMENODE_LAZY_PERSIST_FILE_SCRUB_BREAKOUT_MS = "dfs.namenode.lazypersist.file.scrub.breakout.sec";
+  public static final int DFS_NAMENODE_LAZY_PERSIST_FILE_SCRUB_BREAKOUT_MS_DEFAULT = 1000;
+
   public static final String  DFS_NAMENODE_EDITS_NOEDITLOGCHANNELFLUSH = "dfs.namenode.edits.noeditlogchannelflush";
   public static final boolean DFS_NAMENODE_EDITS_NOEDITLOGCHANNELFLUSH_DEFAULT = false;
 

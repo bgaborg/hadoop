@@ -40,11 +40,13 @@ import org.apache.hadoop.fs.s3a.Constants;
 import org.apache.hadoop.fs.s3a.Tristate;
 
 import org.apache.hadoop.io.IOUtils;
+import org.apache.hadoop.util.Time;
 import org.junit.AfterClass;
 import org.junit.Assume;
 import org.junit.BeforeClass;
 import org.junit.Test;
 
+import org.mockito.Mockito;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -177,6 +179,10 @@ public class ITestDynamoDBMetadataStore extends MetadataStoreTestBase {
         ddbmsStatic.forgetMetadata(desc.next().getPath());
       }
     }
+
+    Configuration ddbmsConf = ddbmsStatic.getConf();
+    ddbmsConf.unset(S3GUARD_DDB_AUTHORITATIVE_DIR_TTL_TIME_MSEC);
+    ddbmsConf.unset(S3GUARD_DDB_ENTRY_PRUNE_MSEC);
 
     fileSystem.close();
   }
@@ -619,6 +625,133 @@ public class ITestDynamoDBMetadataStore extends MetadataStoreTestBase {
       }
       ddbms.destroy();
     }
+  }
+
+  @Test
+  public void testGetPathMetadataWithExpiryEntry() throws Exception {
+    Configuration conf = ddbmsStatic.getConf();
+    conf.set(S3GUARD_DDB_ENTRY_PRUNE_MSEC, "100");
+
+    Item item = Mockito.mock(Item.class);
+    Mockito.when(item.getString(PARENT)).thenReturn("/testNoSuchBucket");
+    Mockito.when(item.getString(CHILD)).thenReturn("/");
+    Mockito.when(item.hasAttribute(LAST_UPDATED)).thenReturn(true);
+
+    assertEquals(null, ddbmsStatic.getPathMetadataWithExpiry(null));
+
+    long now = Time.monotonicNow();
+    Mockito.when(item.getLong(LAST_UPDATED)).thenReturn(now);
+    DDBPathMetadata notExpiredMetaGreaterUpdateTime =
+        ddbmsStatic.getPathMetadataWithExpiry(item);
+    assertNotNull("This entry should not be removed",
+        notExpiredMetaGreaterUpdateTime);
+    assertEquals(now, notExpiredMetaGreaterUpdateTime.getLastUpdated());
+
+    Mockito.when(item.getLong(LAST_UPDATED)).thenReturn(0l);
+    DDBPathMetadata expiredMeta =
+        ddbmsStatic.getPathMetadataWithExpiry(item);
+    assertNull("This entry should be removed", expiredMeta);
+  }
+
+  @Test
+  public void testGetPathMetadataWithExpiryAuthFlag() throws Exception {
+    Configuration conf = ddbmsStatic.getConf();
+    conf.set(S3GUARD_DDB_AUTHORITATIVE_DIR_TTL_TIME_MSEC, "100");
+
+    Item item = Mockito.mock(Item.class);
+    Mockito.when(item.getString(PARENT)).thenReturn("/testNoSuchBucket");
+    Mockito.when(item.getString(CHILD)).thenReturn("/");
+    Mockito.when(item.hasAttribute(LAST_UPDATED)).thenReturn(true);
+    Mockito.when(item.hasAttribute(IS_DIR)).thenReturn(true);
+    Mockito.when(item.getBoolean(IS_DIR)).thenReturn(true);
+    Mockito.when(item.hasAttribute(IS_AUTHORITATIVE)).thenReturn(true);
+    Mockito.when(item.getBoolean(IS_AUTHORITATIVE)).thenReturn(true);
+
+    assertEquals(null, ddbmsStatic.getPathMetadataWithExpiry(null));
+
+    long now = Time.monotonicNow();
+    Mockito.when(item.getLong(LAST_UPDATED)).thenReturn(now);
+    DDBPathMetadata notExpiredMetaGreaterUpdateTime =
+        ddbmsStatic.getPathMetadataWithExpiry(item);
+    assertNotNull(notExpiredMetaGreaterUpdateTime);
+    assertEquals(now, notExpiredMetaGreaterUpdateTime.getLastUpdated());
+    assertTrue("Directory should stay authoritative",
+        notExpiredMetaGreaterUpdateTime.isAuthoritativeDir());
+
+    Mockito.when(item.getLong(LAST_UPDATED)).thenReturn(now - 500);
+    DDBPathMetadata expiredMeta =
+        ddbmsStatic.getPathMetadataWithExpiry(item);
+    assertNotNull(expiredMeta);
+    assertFalse("Directory should lose authoritativeness",
+        expiredMeta.isAuthoritativeDir());
+  }
+
+  @Test
+  public void testTtlAuthoritativeDirFlagExpires() throws Exception {
+    final String testRoot = "/testAuthoritativeDirFlagExpires";
+    Configuration conf = ddbmsStatic.getConf();
+    conf.set(S3GUARD_DDB_AUTHORITATIVE_DIR_TTL_TIME_MSEC, "0");
+
+    final Path dir1 = strToPath(testRoot + "/dir1");
+    List<PathMetadata> pmList = Lists.newArrayList();
+    DirListingMetadata dirListingMetadata =
+        new DirListingMetadata(dir1, pmList, true);
+
+    ddbmsStatic.put(dirListingMetadata);
+
+    DirListingMetadata dlm = ddbmsStatic.listChildren(dir1);
+    assertFalse("Listing should not stay authoritative",
+        dlm.isAuthoritative());
+
+    DDBPathMetadata pm = ddbmsStatic.get(dir1);
+    assertFalse("Metadata should not stay authoritative",
+        pm.isAuthoritativeDir());
+  }
+
+  @Test
+  public void testTtlAuthoritativeDirFlagRetains() throws Exception {
+    final String testRoot = "/testAuthoritativeDirFlagRetains";
+    Configuration conf = ddbmsStatic.getConf();
+    conf.set(S3GUARD_DDB_AUTHORITATIVE_DIR_TTL_TIME_MSEC, "10000");
+
+    final Path dir1 = strToPath(testRoot + "/dir1");
+    List<PathMetadata> pmList = Lists.newArrayList();
+    DirListingMetadata dirListingMetadata =
+        new DirListingMetadata(dir1, pmList, true);
+
+    ddbmsStatic.put(dirListingMetadata);
+
+    DirListingMetadata dlm = ddbmsStatic.listChildren(dir1);
+    assertTrue("Listing should stay authoritative", dlm.isAuthoritative());
+
+    DDBPathMetadata pm = ddbmsStatic.get(dir1);
+    assertTrue("Metadata should stay authoritative", pm.isAuthoritativeDir());
+  }
+
+  @Test
+  public void testTtlEntryRemovalExpires() throws Exception {
+    final String testRoot = "/testTtlEntryRemovalExpires";
+    Configuration conf = ddbmsStatic.getConf();
+    conf.set(S3GUARD_DDB_ENTRY_PRUNE_MSEC, "0");
+
+    final Path file1 = strToPath(testRoot + "/file1.txt");
+    ddbmsStatic.put(
+        new PathMetadata(basicFileStatus(file1, 1024, false)));
+
+    assertNull(ddbmsStatic.get(file1));
+  }
+
+  @Test
+  public void testTtlEntryRemovalRetains() throws Exception {
+    final String testRoot = "/testTtlEntryRemovalExpires";
+    Configuration conf = ddbmsStatic.getConf();
+    conf.set(S3GUARD_DDB_ENTRY_PRUNE_MSEC, "10000");
+
+    final Path file1 = strToPath(testRoot + "/file1.txt");
+    ddbmsStatic.put(
+        new PathMetadata(basicFileStatus(file1, 1024, false)));
+
+    assertNotNull(ddbmsStatic.get(file1));
   }
 
   /**

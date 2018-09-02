@@ -64,6 +64,7 @@ import com.amazonaws.services.dynamodbv2.model.TableDescription;
 import com.amazonaws.services.dynamodbv2.model.WriteRequest;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
+import org.apache.hadoop.util.Time;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -499,7 +500,7 @@ public class DynamoDBMetadataStore implements MetadataStore {
           new DDBPathMetadata(makeDirStatus(username, path));
     } else {
       final Item item = getConsistentItem(pathToKey(path));
-      meta = itemToPathMetadata(item, username);
+      meta = getPathMetadataWithExpiry(item);
       LOG.debug("Get from table {} in region {} returning for {}: {}",
           tableName, region, path, meta);
     }
@@ -514,17 +515,62 @@ public class DynamoDBMetadataStore implements MetadataStore {
             .withFilterExpression(IS_DELETED + " = :false")
             .withValueMap(deleteTrackingValueMap);
         final ItemCollection<QueryOutcome> items = table.query(spec);
-        boolean hasChildren = items.iterator().hasNext();
-        // When this class has support for authoritative
-        // (fully-cached) directory listings, we may also be able to answer
-        // TRUE here.  Until then, we don't know if we have full listing or
-        // not, thus the UNKNOWN here:
-        meta.setIsEmptyDirectory(
-            hasChildren ? Tristate.FALSE : Tristate.UNKNOWN);
+
+        // Set the empty directory flag.
+        meta.checkIsEmptyDirectory(items);
       }
     }
-
     return meta;
+  }
+
+  long getEntryPruneExpiryTime() {
+    long ttlPruneExpiryTime = conf.getLong(S3GUARD_DDB_ENTRY_PRUNE_MSEC,
+        DEFAULT_S3GUARD_DDB_ENTRY_PRUNE_MSEC);
+    return Time.monotonicNow() - ttlPruneExpiryTime;
+  }
+
+  long getAuthoritativeDirExpiryTime() {
+    long ttlAuthExpiryTime = conf.getLong(
+        S3GUARD_DDB_AUTHORITATIVE_DIR_TTL_TIME_MSEC,
+        DEFAULT_S3GUARD_DDB_AUTHORITATIVE_DIR_TTL_TIME_MSEC);
+    return Time.monotonicNow() - ttlAuthExpiryTime;
+  }
+
+  DDBPathMetadata getPathMetadataWithExpiry(Item item)
+      throws IOException {
+    DDBPathMetadata metadata = itemToPathMetadata(item, username);
+    if (metadata == null) {
+      return null;
+    }
+
+    LOG.debug("Get entry with expiry for path: {}",
+        metadata.getFileStatus().getPath());
+
+    // If the last updated time of the entry is older than the expiry
+    // * remove the entry from ddb
+    // * return null
+    long entryExpiredFrom = getEntryPruneExpiryTime();
+    if(metadata.getLastUpdated() < entryExpiredFrom) {
+      innerDelete(metadata.getFileStatus().getPath(), false);
+      LOG.debug("Removing expired item for path: {}, lastUpdated: {}, "
+          + "expiry: {}", metadata.getFileStatus().getPath(),
+          metadata.getLastUpdated(), entryExpiredFrom);
+      return null;
+    } else {
+      LOG.debug("Entry is not removed for path: {}",
+          metadata.getFileStatus().getPath());
+    }
+
+    // Expire authoritative directory flag
+    long authoritativeExpiredFrom = getAuthoritativeDirExpiryTime();
+    if(metadata.getFileStatus().isDirectory()
+        && metadata.getLastUpdated() < authoritativeExpiredFrom) {
+      LOG.debug("Authoritative bit is expired for path: {}",
+          metadata.getFileStatus().getPath());
+      metadata.setAuthoritativeDir(false);
+    }
+
+    return metadata;
   }
 
   /**
@@ -556,7 +602,8 @@ public class DynamoDBMetadataStore implements MetadataStore {
 
           final List<PathMetadata> metas = new ArrayList<>();
           for (Item item : items) {
-            DDBPathMetadata meta = itemToPathMetadata(item, username);
+            DDBPathMetadata meta =
+                getPathMetadataWithExpiry(item);
             metas.add(meta);
           }
 
@@ -744,6 +791,9 @@ public class DynamoDBMetadataStore implements MetadataStore {
 
   @Retries.OnceRaw
   private void innerPut(Collection<DDBPathMetadata> metas) throws IOException {
+    // set the last updated time of the entry
+    metas.forEach(meta -> meta.setLastUpdated(Time.monotonicNow()));
+
     Item[] items = pathMetadataToItem(completeAncestry(metas));
     LOG.debug("Saving batch of {} items to table {}, region {}", items.length,
         tableName, region);
@@ -1377,4 +1427,9 @@ public class DynamoDBMetadataStore implements MetadataStore {
     }
   }
 
+
+  @VisibleForTesting
+  protected Configuration getConf() {
+    return conf;
+  }
 }

@@ -21,6 +21,8 @@ package org.apache.hadoop.fs.s3a;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
 
+import java.util.concurrent.TimeUnit;
+
 /**
  * All the constants used with the {@link S3AFileSystem}.
  *
@@ -471,6 +473,34 @@ public final class Constants {
   public static final String S3GUARD_DDB_BACKGROUND_SLEEP_MSEC_KEY =
       "fs.s3a.s3guard.ddb.background.sleep";
   public static final int S3GUARD_DDB_BACKGROUND_SLEEP_MSEC_DEFAULT = 25;
+
+  /**
+   * DynamoDBMetadataStore Time to live (TTL) for authoritative directory
+   * listings in milliseconds. The value set will be expiration time of the
+   * authoritativeness of the directory listings.
+   * All directory listing entries will lose the authoritative bit if
+   * lastUpdated <
+   *        (Time.monotonicNow() - S3GUARD_DDB_AUTHORITATIVE_DIR_TTL_TIME_MSEC)
+   */
+  @InterfaceStability.Evolving
+  public static final String S3GUARD_DDB_AUTHORITATIVE_DIR_TTL_TIME_MSEC =
+      "fs.s3a.s3guard.ddb.ttl.authoritative.dir.time";
+
+  public static final long DEFAULT_S3GUARD_DDB_AUTHORITATIVE_DIR_TTL_TIME_MSEC =
+      TimeUnit.SECONDS.toMillis(10);
+
+  /**
+   * DynamoDBMetadataStore Time to live (TTL) for entries in milliseconds.
+   * The value set will be expiration time of the entry.
+   * All file entries will be deleted from DynamoDB table if
+   * lastUpdated < (Time.monotonicNow() - S3GUARD_DDB_ENTRY_PRUNE_MSEC)
+   */
+  @InterfaceStability.Evolving
+  public static final String S3GUARD_DDB_ENTRY_PRUNE_MSEC  =
+      "fs.s3a.s3guard.ddb.ttl.prune.time";
+
+  public static final long DEFAULT_S3GUARD_DDB_ENTRY_PRUNE_MSEC =
+      TimeUnit.HOURS.toMillis(24);
 
   /**
    * The default "Null" metadata store: {@value}.

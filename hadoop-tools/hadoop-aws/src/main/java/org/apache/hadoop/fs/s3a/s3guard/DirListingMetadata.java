@@ -76,6 +76,11 @@ public class DirListingMetadata {
 
     if (listing != null) {
       for (PathMetadata entry : listing) {
+        // In case of entry has been expired an entry could be null in the
+        // listing
+        if(entry == null) {
+          continue;
+        }
         Path childPath = entry.getFileStatus().getPath();
         checkChildPath(childPath);
         listMap.put(childPath, entry);

@@ -140,6 +140,7 @@ public abstract class AbstractITCommitMRJob extends AbstractCommitITest {
   @Test
   public void testMRJob() throws Exception {
     S3AFileSystem fs = getFileSystem();
+    LOG.warn("FS class: "+fs.getClass().getCanonicalName());
     // final dest is in S3A
     Path outputPath = path("testMRJob");
 

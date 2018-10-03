@@ -474,7 +474,11 @@ public abstract class FileSystem extends Configured implements Closeable {
       return createFileSystem(uri, conf);
     }
 
-    return CACHE.get(uri, conf);
+    LOG.info("Config fs: " + conf.get("fs.s3a.impl"));
+
+    FileSystem fileSystem = CACHE.get(uri, conf);
+    LOG.info("FS class: "+fileSystem.getClass().getCanonicalName());
+    return fileSystem;
   }
 
   /**

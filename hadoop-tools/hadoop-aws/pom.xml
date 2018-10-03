@@ -147,6 +147,7 @@
                     <test.build.data>${test.build.data}/${surefire.forkNumber}</test.build.data>
                     <test.build.dir>${test.build.dir}/${surefire.forkNumber}</test.build.dir>
                     <hadoop.tmp.dir>${hadoop.tmp.dir}/${surefire.forkNumber}</hadoop.tmp.dir>
+                    <fs.s3a.impl>org.apache.hadoop.fs.s3a.S3ACloseEnforcedFileSystem</fs.s3a.impl>
 
                     <!-- Due to a Maven quirk, setting this to just -->
                     <!-- surefire.forkNumber won't do the parameter -->
@@ -210,6 +211,7 @@
                     <fs.s3a.s3guard.test.enabled>${fs.s3a.s3guard.test.enabled}</fs.s3a.s3guard.test.enabled>
                     <fs.s3a.s3guard.test.implementation>${fs.s3a.s3guard.test.implementation}</fs.s3a.s3guard.test.implementation>
                     <fs.s3a.s3guard.test.authoritative>${fs.s3a.s3guard.test.authoritative}</fs.s3a.s3guard.test.authoritative>
+                    <fs.s3a.impl>org.apache.hadoop.fs.s3a.S3ACloseEnforcedFileSystem</fs.s3a.impl>
                   </systemPropertyVariables>
                   <!-- Do a sequential run for tests that cannot handle -->
                   <!-- parallel execution. -->

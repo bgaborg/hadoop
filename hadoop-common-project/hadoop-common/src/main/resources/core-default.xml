@@ -1392,7 +1392,7 @@
 
 <property>
   <name>fs.s3a.impl</name>
-  <value>org.apache.hadoop.fs.s3a.S3AFileSystem</value>
+  <value>org.apache.hadoop.fs.s3a.S3ACloseEnforcedFileSystem</value>
   <description>The implementation class of the S3A Filesystem</description>
 </property>
 

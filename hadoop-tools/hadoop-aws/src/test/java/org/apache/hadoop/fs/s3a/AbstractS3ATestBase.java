@@ -88,6 +88,7 @@ public abstract class AbstractS3ATestBase extends AbstractFSContractTestBase
    */
   @Override
   public S3AFileSystem getFileSystem() {
+    LOG.warn("FS class: "+super.getFileSystem().getClass().getCanonicalName());
     return (S3AFileSystem) super.getFileSystem();
   }
 

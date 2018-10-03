@@ -100,6 +100,7 @@ public abstract class AbstractBondedFSContract extends AbstractFSContract {
 
   @Override
   public FileSystem getTestFileSystem() throws IOException {
+    LOG.warn("FS class: "+filesystem.getClass().getCanonicalName());
     return filesystem;
   }
 

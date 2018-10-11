@@ -51,8 +51,14 @@ public abstract class AbstractS3ATestBase extends AbstractFSContractTestBase
   @Override
   public void teardown() throws Exception {
     super.teardown();
-    describe("closing file system");
-    IOUtils.closeStream(getFileSystem());
+    boolean fsCacheDisabled = getFileSystem().getConf()
+        .getBoolean(FS_S3A_IMPL_DISABLE_CACHE, false);
+    if(fsCacheDisabled){
+      describe("closing file system");
+      LOG.warn("Closing fs. FS_S3A_IMPL_DISABLE_CACHE: " + fsCacheDisabled);
+      IOUtils.closeStream(getFileSystem());
+    }
+
   }
 
   @Before

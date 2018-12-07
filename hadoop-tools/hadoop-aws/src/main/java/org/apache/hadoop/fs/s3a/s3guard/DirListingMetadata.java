@@ -64,7 +64,7 @@ public class DirListingMetadata extends ExpirableMetadata {
    *     all paths added later via {@link #put(FileStatus)} must also have
    *     the same host.
    * @param listing Entries in the directory.
-   * @param isAuthoritative true iff listing is the full contents of the
+   * @param isAuthoritative true if listing is the full contents of the
    *     directory, and the calling client reports that this may be cached as
    *     the full and authoritative listing of all files in the directory.
    */

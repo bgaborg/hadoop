@@ -27,11 +27,15 @@ import java.io.InputStreamReader;
 import java.net.URI;
 import java.util.Collection;
 import java.util.HashSet;
+import java.util.LinkedList;
+import java.util.List;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.Callable;
 import java.util.concurrent.TimeUnit;
 
+import org.apache.hadoop.fs.FSDataOutputStream;
+import org.apache.hadoop.fs.FSDataOutputStreamBuilder;
 import org.apache.hadoop.fs.s3a.S3AUtils;
 import org.apache.hadoop.util.StopWatch;
 import com.google.common.base.Preconditions;
@@ -525,5 +529,49 @@ public abstract class AbstractS3GuardToolTestBase extends AbstractS3ATestBase {
         filesOnMS, actualOnMS);
     assertEquals("Mismatched s3 outputs: " + actualOut, filesOnS3, actualOnS3);
     assertFalse("Diff contained duplicates", duplicates);
+  }
+
+  @Test
+  public void testFsync() throws Exception {
+    S3AFileSystem fs = getFileSystem();
+    MetadataStore ms = getMetadataStore();
+
+    S3GuardTool.Fsync cmd = new S3GuardTool.Fsync(fs.getConf());
+    cmd.setStore(ms);
+    ByteArrayOutputStream buf = new ByteArrayOutputStream();
+    exec(SUCCESS, "", cmd, buf, "fsync", "-check", path("/").toString());
+  }
+
+  @Test
+  public void generateJunkToMyS3Bucket() {
+    String text1 = "Bacon ipsum dolor amet filet mignon landjaeger jowl.";
+    String text2 = "Tail strip steak chicken turducken ham hock.";
+
+
+    List<Path> dirs = new LinkedList<>();
+    List<Path> files = new LinkedList<>();
+
+    for (int i = 0; i < 10; i++) {
+      dirs.add(new Path("dir-" + i));
+    }
+
+    dirs.stream().forEach(dir -> {
+      for (int i = 0; i < 10; i++) {
+        Path fPath = new Path(dir, "file-" + i);
+        files.add(fPath);
+
+        try {
+          FSDataOutputStream stream;
+          stream = rawFs.create(fPath);
+          stream.write(text1.getBytes());
+          stream.close();
+        } catch (IOException e) {
+          e.printStackTrace();
+        }
+      }
+    });
+
+
+
   }
 }

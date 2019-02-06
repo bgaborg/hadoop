@@ -785,6 +785,112 @@ public abstract class S3GuardTool extends Configured implements Tool {
   }
 
   /**
+   * Compares S3 with MetadataStore. Returns failure if invariants violated,
+   * and able to fix the issues.
+   */
+  static class Fsync extends S3GuardTool {
+    public static final String CHECK = "check";
+    public static final String FIX = "fix";
+    PrintStream out;
+
+    public static final String NAME = "fsync";
+    public static final String PURPOSE = "compare s3 with metadata store";
+    private static final String USAGE = NAME + " [OPTIONS] [s3a://BUCKET]\n" +
+        "\t" + PURPOSE + "\n\n" +
+        "Common options:\n" +
+        "  -" + CHECK + " check - check if there are any issues\n" +
+        "  -" + FIX + " fix - fix the issues\n" +
+        "\n" +
+        "  URLs for Amazon DynamoDB are of the form dynamodb://TABLE_NAME.\n" +
+        "  Specifying both the -" + REGION_FLAG + " option and an S3A path\n" +
+        "  is not supported.";
+
+    /**
+     * Constructor a S3Guard tool with HDFS configuration.
+     *
+     * @param conf Configuration.
+     */
+    protected Fsync(Configuration conf) {
+      super(conf, CHECK, FIX);
+    }
+
+    @Override public String getUsage() {
+      return USAGE;
+    }
+
+    @Override public String getName() {
+      return NAME;
+    }
+
+    @Override public int run(String[] args, PrintStream out) throws Exception {
+      List<String> paths = parseArgs(args);
+      if(paths.isEmpty()) {
+        errorln(getUsage());
+        throw invalidArgs("no arguments");
+      }
+      this.out = System.out;
+
+      CommandFormat commands = getCommandFormat();
+      if(commands.getOpt(FIX)) {
+        println(out, "FIX passed");
+      } else if (commands.getOpt(CHECK)) {
+        println(out, "CHECK passed");
+      } else {
+        throw invalidArgs("Bad argument");
+      }
+
+      String s3Path = paths.get(0);
+      initS3AFileSystem(s3Path);
+
+      URI uri = toUri(s3Path);
+      String filePath = uri.getPath();
+      if(filePath.isEmpty()) {
+        // Root will be the path, as no further path is specified
+        filePath = "/";
+      }
+      Path path = new Path(filePath);
+      FileStatus status = getFilesystem().getFileStatus(path);
+
+      try {
+        initMetadataStore(false);
+      } catch (FileNotFoundException e) {
+        throw storeNotFound(e);
+      }
+
+      long issues = 0;
+      if (status.isDirectory()) {
+        issues = doFsync(status, false);
+      } else {
+        println(out, "{} is a file.", status);
+      }
+
+      println(out, "Found %d invariant violations between metadata store and "
+          + "S3.", issues);
+
+      return SUCCESS;
+    }
+
+    private long doFsync(FileStatus status, boolean doFix) throws IOException {
+      MetadataStore ms = getStore();
+      RemoteIterator<LocatedFileStatus> it = getFilesystem()
+          .listFilesAndEmptyDirectories(status.getPath(), true);
+      long issues = 0;
+
+      while (it.hasNext()) {
+        LocatedFileStatus located = it.next();
+        FileStatus child;
+        if(located.isDirectory()) {
+          println(out, "Directory: %s", located.getPath());
+        } else {
+          println(out, "File: %s", located.getPath());
+        }
+      }
+
+      return issues;
+    }
+  }
+
+  /**
    * Show diffs between the s3 and metadata store.
    */
   static class Diff extends S3GuardTool {
@@ -1610,6 +1716,9 @@ public abstract class S3GuardTool extends Configured implements Tool {
       break;
     case Import.NAME:
       command = new Import(conf);
+      break;
+    case Fsync.NAME:
+      command = new Fsync(conf);
       break;
     case BucketInfo.NAME:
       command = new BucketInfo(conf);

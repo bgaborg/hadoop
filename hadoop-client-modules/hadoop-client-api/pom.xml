@@ -226,6 +226,11 @@
                       <pattern>okio/</pattern>
                       <shadedPattern>${shaded.dependency.prefix}.okio.</shadedPattern>
                     </relocation>
+                    <!-- checkerframework (guava 24.1.1 dependency)  -->
+                    <relocation>
+                      <pattern>afu/</pattern>
+                      <shadedPattern>${shaded.dependency.prefix}.afu.</shadedPattern>
+                    </relocation>
                   </relocations>
                   <transformers>
                     <!-- Needed until MSHADE-182 -->
